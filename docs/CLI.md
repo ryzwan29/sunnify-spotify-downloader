@@ -59,7 +59,8 @@ instead of launching the app.
 ### download
 
 ```
-sunnify download <url> [--out DIR] [--format mp3|m4a|opus|flac|wav]
+sunnify download <url> [--out DIR] [--flat]
+                       [--format mp3|m4a|opus|flac|wav]
                        [--quality 128|192|256|320] [--sample-rate auto|44100|48000]
                        [--track-numbers | --no-track-numbers]
                        [--artist-first | --no-artist-first]
@@ -83,6 +84,18 @@ sunnify download <url> [--out DIR] [--format mp3|m4a|opus|flac|wav]
   force-quits.
 - `--cookies FILE` is only for networks YouTube gates; see
   [YouTube cookies](#youtube-cookies).
+- **`--flat`**: download tracks directly into the folder given by `--out`,
+  without creating an auto-named playlist subdirectory. The `.sunnify-manifest.jsonl`
+  resume file is also written directly into that directory. Useful when you want
+  to control the target folder name yourself:
+
+  ```bash
+  # Default: creates /music/My Playlist - Owner/song.mp3
+  sunnify download "https://open.spotify.com/playlist/..." --out /music
+
+  # Flat: creates /music/my-custom-folder/song.mp3
+  sunnify download "https://open.spotify.com/playlist/..." --out /music/my-custom-folder --flat
+  ```
 
 ### Exit codes
 

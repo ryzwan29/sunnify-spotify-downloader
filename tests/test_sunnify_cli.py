@@ -25,7 +25,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def _args(**kw):
     """Namespace with every download flag defaulted to None (not passed)."""
-    base = {"url": "", "out": None, "json": False, "quiet": True}
+    base = {"url": "", "out": None, "json": False, "quiet": True, "flat": False}
     for s in sd.SETTINGS:
         if s.cli_flag:
             base[s.cli_flag.lstrip("-").replace("-", "_")] = None
@@ -322,3 +322,285 @@ class TestBinaryDispatch:
         result = self._run("help", "download")
         assert result.returncode == 0
         assert "usage: sunnify download" in result.stdout
+
+
+class TestFlatMode:
+    """Tests for --flat output directory mode.
+
+    All tests mock the scraper so no network or audio download happens.
+    """
+
+    PLAYLIST_URL = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"
+
+    def _make_scrape_playlist_mock(self, tmp_path, manifest_records=None):
+        """Return a side_effect function that simulates scrape_playlist in flat mode.
+
+        When called it writes a fake audio file and optional manifest entries
+        directly into the folder it receives (playlist_folder_path in real code),
+        which in flat mode IS the out_dir the CLI passed in.
+        """
+
+        def _fake_scrape_playlist(url, folder, flat=False):
+            # In flat mode the scraper writes directly into `folder`.
+            # In default (non-flat) mode it would create a sub-dir; we just
+            # write to `folder` for the mock regardless, since we test the
+            # calling convention via call_args instead.
+            (tmp_path / "song.mp3").write_bytes(b"fake audio")
+            if manifest_records:
+                manifest = tmp_path / sd.MANIFEST_FILENAME
+                with open(manifest, "a", encoding="utf-8") as fh:
+                    import json
+
+                    for rec in manifest_records:
+                        fh.write(json.dumps(rec) + "\n")
+
+        return _fake_scrape_playlist
+
+    # ------------------------------------------------------------------
+    # 1. --flat flag appears in download --help
+    # ------------------------------------------------------------------
+
+    def test_flat_flag_in_download_help(self):
+        help_text = (
+            cli.build_parser()._subparsers._group_actions[0].choices["download"].format_help()
+        )
+        assert "--flat" in help_text
+
+    # ------------------------------------------------------------------
+    # 2. Without --flat, scrape_playlist is called with flat=False (default)
+    # ------------------------------------------------------------------
+
+    def test_no_flat_calls_scrape_playlist_with_flat_false(self, tmp_path, capsys):
+        with (
+            patch.object(sd, "get_ffmpeg_path", return_value=str(tmp_path)),
+            patch.object(sd.MusicScraper, "scrape_playlist") as mock_sp,
+        ):
+            cli.cmd_download(
+                _args(
+                    url=self.PLAYLIST_URL,
+                    out=str(tmp_path),
+                    json=True,
+                    flat=False,
+                )
+            )
+        # flat kwarg must be False (default behaviour preserved)
+        _, kwargs = mock_sp.call_args
+        assert kwargs.get("flat", False) is False
+
+    # ------------------------------------------------------------------
+    # 3. With --flat, scrape_playlist is called with flat=True
+    # ------------------------------------------------------------------
+
+    def test_flat_calls_scrape_playlist_with_flat_true(self, tmp_path, capsys):
+        with (
+            patch.object(sd, "get_ffmpeg_path", return_value=str(tmp_path)),
+            patch.object(sd.MusicScraper, "scrape_playlist") as mock_sp,
+        ):
+            cli.cmd_download(
+                _args(
+                    url=self.PLAYLIST_URL,
+                    out=str(tmp_path),
+                    json=True,
+                    flat=True,
+                )
+            )
+        _, kwargs = mock_sp.call_args
+        assert kwargs.get("flat") is True
+
+    # ------------------------------------------------------------------
+    # 4. run_started event includes flat field
+    # ------------------------------------------------------------------
+
+    def test_run_started_includes_flat_field(self, tmp_path, capsys):
+        with (
+            patch.object(sd, "get_ffmpeg_path", return_value=str(tmp_path)),
+            patch.object(sd.MusicScraper, "scrape_playlist"),
+        ):
+            cli.cmd_download(
+                _args(
+                    url=self.PLAYLIST_URL,
+                    out=str(tmp_path),
+                    json=True,
+                    flat=True,
+                )
+            )
+        events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+        started = next(e for e in events if e["event"] == "run_started")
+        assert started["flat"] is True
+
+    # ------------------------------------------------------------------
+    # 5. flat=True: out_dir is passed unchanged as the second positional arg
+    # ------------------------------------------------------------------
+
+    def test_flat_passes_out_dir_directly(self, tmp_path, capsys):
+        with (
+            patch.object(sd, "get_ffmpeg_path", return_value=str(tmp_path)),
+            patch.object(sd.MusicScraper, "scrape_playlist") as mock_sp,
+        ):
+            cli.cmd_download(
+                _args(
+                    url=self.PLAYLIST_URL,
+                    out=str(tmp_path),
+                    json=True,
+                    flat=True,
+                )
+            )
+        pos_args, _ = mock_sp.call_args
+        # positional: (url, out_dir)
+        passed_folder = pos_args[1] if len(pos_args) > 1 else mock_sp.call_args[1].get("music_folder")
+        assert passed_folder == str(tmp_path)
+
+
+class TestFlatModeScraper:
+    """Unit tests for MusicScraper.scrape_playlist flat kwarg.
+
+    These tests exercise the scraper in isolation using mocked Spotify API
+    and mocked download logic so no network is required.
+    """
+
+    PLAYLIST_URL = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"
+
+    def _make_mock_api(self, playlist_name="My Playlist", owner="owner", n_tracks=3):
+        """Build a mock PlaylistClient that returns canned metadata + tracks."""
+        from unittest.mock import MagicMock
+
+        track_ids = [f"track{i}" for i in range(n_tracks)]
+
+        track_objs = []
+        for tid in track_ids:
+            t = MagicMock()
+            t.id = tid
+            t.title = f"Song {tid}"
+            t.artists = "Artist"
+            t.duration_ms = 180_000
+            t.cover_url = ""
+            t.album = "Album"
+            t.release_date = "2024"
+            t.position = None
+            track_objs.append(t)
+
+        playlist_meta = MagicMock()
+        playlist_meta.name = playlist_name
+        playlist_meta.owner = owner
+        playlist_meta.cover_url = ""
+        playlist_meta.track_count = n_tracks
+
+        api = MagicMock()
+        api.get_playlist_metadata.return_value = playlist_meta
+        api.iter_playlist_tracks.return_value = iter(track_objs)
+        api.get_track.side_effect = lambda tid: next(
+            (t for t in track_objs if t.id == tid), None
+        )
+        return api, track_ids
+
+    def _make_scraper(self):
+        import threading
+
+        from PyQt6.QtWidgets import QApplication  # noqa: F401 – needed for QThread
+
+        cancel = threading.Event()
+        scraper = sd.MusicScraper(cancel_event=cancel)
+        return scraper, cancel
+
+    def test_flat_mode_uses_folder_directly(self, tmp_path):
+        """With flat=True, files land in tmp_path directly (no subdirectory)."""
+        api, track_ids = self._make_mock_api()
+        scraper, cancel = self._make_scraper()
+        scraper.spotifydown_api = api
+
+        # Mock the actual download so no network is hit
+        with patch.object(
+            scraper,
+            "_download_one_track",
+            side_effect=lambda track, folder, cover, track_num=0: None,
+        ) as mock_dl:
+            scraper.scrape_playlist(self.PLAYLIST_URL, str(tmp_path), flat=True)
+
+        # Every call must have received tmp_path as its folder argument
+        for call in mock_dl.call_args_list:
+            pos_args, _ = call
+            assert pos_args[1] == str(tmp_path), (
+                f"Expected tracks written to {tmp_path!r}, got {pos_args[1]!r}"
+            )
+
+    def test_non_flat_mode_uses_subdirectory(self, tmp_path):
+        """Without flat, files land in a subdirectory derived from the playlist name."""
+        api, track_ids = self._make_mock_api(playlist_name="My Playlist", owner="owner")
+        scraper, cancel = self._make_scraper()
+        scraper.spotifydown_api = api
+
+        with patch.object(
+            scraper,
+            "_download_one_track",
+            side_effect=lambda track, folder, cover, track_num=0: None,
+        ) as mock_dl:
+            scraper.scrape_playlist(self.PLAYLIST_URL, str(tmp_path), flat=False)
+
+        for call in mock_dl.call_args_list:
+            pos_args, _ = call
+            # The download folder must be INSIDE tmp_path, not tmp_path itself
+            assert pos_args[1] != str(tmp_path), (
+                "Non-flat mode should create a subdirectory, not write directly to out_dir"
+            )
+            assert pos_args[1].startswith(str(tmp_path)), (
+                f"Expected subdirectory under {tmp_path!r}, got {pos_args[1]!r}"
+            )
+
+    def test_flat_mode_manifest_in_out_dir(self, tmp_path):
+        """With flat=True, _manifest_path is set inside out_dir (not a subdirectory)."""
+        api, _ = self._make_mock_api(n_tracks=1)
+        scraper, cancel = self._make_scraper()
+        scraper.spotifydown_api = api
+
+        with patch.object(
+            scraper,
+            "_download_one_track",
+            side_effect=lambda track, folder, cover, track_num=0: None,
+        ):
+            scraper.scrape_playlist(self.PLAYLIST_URL, str(tmp_path), flat=True)
+
+        expected_manifest = os.path.join(str(tmp_path), sd.MANIFEST_FILENAME)
+        assert scraper._manifest_path == expected_manifest
+
+    def test_flat_mode_incremental_skips_manifest_tracks(self, tmp_path):
+        """With flat=True, tracks already in the manifest are skipped (incremental downloads)."""
+        api, track_ids = self._make_mock_api(n_tracks=3)
+        # Pre-populate manifest with the first two tracks (simulate a prior run)
+        manifest_path = tmp_path / sd.MANIFEST_FILENAME
+        with open(manifest_path, "w", encoding="utf-8") as fh:
+            for tid in track_ids[:2]:
+                # We write a fake file so the manifest entry is considered "valid"
+                fake_file = f"Song {tid} - Artist.mp3"
+                (tmp_path / fake_file).write_bytes(b"fake")
+                fh.write(json.dumps({"id": tid, "file": fake_file}) + "\n")
+
+        # Only the third track should actually be downloaded
+        downloaded = []
+
+        def _fake_download(track, folder, cover, track_num=0):
+            downloaded.append(track.id)
+
+        scraper, cancel = self._make_scraper()
+        scraper.spotifydown_api = api
+
+        # iter_playlist_tracks uses skip_ids; wire that up
+        api.iter_playlist_tracks.side_effect = lambda pid, content_type, skip_ids=None: iter(
+            [t for t in [api.get_track(tid) for tid in track_ids] if t and t.id not in (skip_ids or set())]
+        )
+
+        with patch.object(scraper, "_download_one_track", side_effect=_fake_download):
+            scraper.scrape_playlist(self.PLAYLIST_URL, str(tmp_path), flat=True)
+
+        # Only track2 should have been downloaded (track0 and track1 were in the manifest)
+        assert downloaded == [track_ids[2]], f"Expected only new track, got: {downloaded}"
+
+    def test_flat_flag_in_parser_is_store_true(self):
+        """--flat is a boolean flag (store_true), not a value option."""
+        parser = cli.build_parser()
+        dl_parser = parser._subparsers._group_actions[0].choices["download"]
+        # Parse with --flat set
+        ns = dl_parser.parse_args(["https://open.spotify.com/playlist/x", "--flat"])
+        assert ns.flat is True
+        # Without the flag, it defaults to False
+        ns2 = dl_parser.parse_args(["https://open.spotify.com/playlist/x"])
+        assert ns2.flat is False

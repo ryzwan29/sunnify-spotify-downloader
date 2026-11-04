@@ -285,6 +285,7 @@ def cmd_download(args) -> int:
     with contextlib.suppress(Exception):
         signal.signal(signal.SIGINT, _sigint)
 
+    flat = getattr(args, "flat", False)
     emitter.event(
         "run_started",
         url=args.url,
@@ -298,6 +299,7 @@ def cmd_download(args) -> int:
         track_numbers=scraper.include_track_number,
         loose_match=scraper.loose_match,
         cookies=bool(scraper.cookies_file),
+        flat=flat,
     )
     t0 = time.monotonic()
     code = None
@@ -305,7 +307,7 @@ def cmd_download(args) -> int:
         if url_type == "track":
             scraper.scrape_track(args.url, out_dir)
         else:
-            scraper.scrape_playlist(args.url, out_dir)
+            scraper.scrape_playlist(args.url, out_dir, flat=flat)
     except app.FolderLockedError as exc:
         emitter.error(
             str(exc),
@@ -634,6 +636,15 @@ def build_parser() -> argparse.ArgumentParser:
                 default=None,
                 help=f"{s.help} (default: {cfg[s.key]}, from saved settings)",
             )
+    dl.add_argument(
+        "--flat",
+        action="store_true",
+        default=False,
+        help=(
+            "download tracks directly into the --out directory without creating a "
+            "playlist-name subdirectory (useful when you want to control the folder name yourself)"
+        ),
+    )
     dl.add_argument("--json", action="store_true", help="emit NDJSON progress events on stdout")
     dl.add_argument(
         "--quiet", "-Q", action="store_true", help="suppress progress (errors still print)"

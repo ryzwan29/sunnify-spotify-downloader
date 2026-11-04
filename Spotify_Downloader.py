@@ -1582,7 +1582,7 @@ class MusicScraper(QThread):
             except OSError:
                 pass
 
-    def scrape_playlist(self, spotify_playlist_link, music_folder):
+    def scrape_playlist(self, spotify_playlist_link, music_folder, flat: bool = False):
         # Reset mutable state so repeat invocations on the same scraper
         # instance don't carry stale counters or failure lists.
         with self._counter_lock:
@@ -1616,7 +1616,13 @@ class MusicScraper(QThread):
         playlist_display_name = self.format_playlist_name(metadata)
         self.song_Album.emit(playlist_display_name)
 
-        playlist_folder_path = self.prepare_playlist_folder(music_folder, playlist_display_name)
+        # flat mode: use music_folder directly, skipping the auto-generated
+        # playlist-name subdirectory that prepare_playlist_folder would create.
+        if flat:
+            os.makedirs(music_folder, exist_ok=True)
+            playlist_folder_path = music_folder
+        else:
+            playlist_folder_path = self.prepare_playlist_folder(music_folder, playlist_display_name)
         with folder_lock(playlist_folder_path):
             # Resume support: skip tracks already downloaded in a previous run of
             # this folder before fetching their (rate-limited) metadata, so a huge
